@@ -1,0 +1,9 @@
+{
+  "name": "arkwasm",
+  "version": "1.0.0",
+  "description": "WebAssembly Micro Runtime ported to pure ArkTS for HarmonyOS. Interpreter-only mode.",
+  "main": "",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}

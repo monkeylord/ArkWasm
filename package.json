@@ -1,0 +1,18 @@
+{
+  "name": "arkwasm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebAssembly Micro Runtime — pure TypeScript interpreter for HarmonyOS & Web",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:test": "node build.mjs test",
+    "build:dist": "node build.mjs dist",
+    "build:ts": "node build.mjs ts",
+    "build:har": "node build.mjs har",
+    "test": "npm run build:test && tsx tests/src/test_all.ts && tsx tests/src/test_wamr.ts && tsx tests/src/test_wamr_malformed.ts && tsx tests/src/test_wamr_regression.ts && tsx tests/src/test_host_import.ts && tsx tests/src/test_features.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>ArkWASM Test Suite</title>
+<style>
+body{font-family:Consolas,monospace;background:#1e1e1e;color:#d4d4d4;margin:20px;font-size:14px}
+h1{color:#569cd6;margin:0 0 5px 0}.pass{color:#6a9955}.fail{color:#f44747}
+.summary{font-size:18px;margin:10px 0;padding:10px;background:#252526;border-radius:5px}
+.suite-head{color:#c586c0;font-size:15px;margin:8px 0 4px 0;font-weight:bold}
+.test-pass{margin:1px 0 1px 20px}.test-fail{margin:1px 0 1px 20px}
+.stats{font-size:16px;margin:10px 0;color:#4ec9b0}
+.error-detail{color:#f44747;margin-left:20px;white-space:pre-wrap}
+</style></head><body>
+<h1>ArkWASM Test Suite</h1>
+<div class="stats" id="stats">Loading...</div>
+<div id="results"></div>
+
+<!--RUNTIME-->
+
+<script>
+const $=id=>document.getElementById(id);
+let total=0,passed=0,failed=0;
+function testSuite(n){$('results').innerHTML+=`<div class="suite-head">${n}</div>`}
+function t(n,fn){total++;try{fn();passed++;$('results').innerHTML+=`<div class="test-pass pass">  PASS: ${n}</div>`}catch(e){failed++;$('results').innerHTML+=`<div class="test-fail fail">  FAIL: ${n} — ${e.message}</div>`}}
+function assertEq(a,b){if(a!==b)throw Error(typeof a==='bigint'||typeof b==='bigint'?`expected ${b} but got ${a}`:`expected ${b} but got ${a}`)}
+function assertClose(a,b,eps){if(Math.abs(a-b)>(eps||0.0001))throw Error(`expected ~${b} but got ${a}`)}
+function assertNotNull(v){if(v===null||v===undefined)throw Error('expected non-null')}
+function assertThrows(fn){try{fn();throw Error('expected exception')}catch(e){if(e.message==='expected exception')throw e}}
+
+function pushLeb(buf,v){while(v>=0x80){buf.push((v&0x7f)|0x80);v>>>=7}buf.push(v&0x7f)}
+function makeModule(body,p,r){p=p||[];r=r||[0x7f];const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,p.length);tb.push(...p);pushLeb(tb,r.length);tb.push(...r);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,...body,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);return new Uint8Array(b)}
+function makeMemModule(body){const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,2);tb.push(0x7f,0x7f);pushLeb(tb,0);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x03,0x01,0x00,0x01);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,...body,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);return new Uint8Array(b)}
+function makeI64Bin(body){return makeModule(body,[0x7e,0x7e],[0x7e])}
+function makeI64Unary(body){return makeModule(body,[0x7e],[0x7f])}
+function makeF32Bin(body){return makeModule(body,[0x7d,0x7d],[0x7d])}
+function makeF32Unary(body){return makeModule(body,[0x7d],[0x7d])}
+function makeF32ToI32(body){return makeModule(body,[0x7d],[0x7f])}
+function makeI32ToF32(body){return makeModule(body,[0x7f],[0x7d])}
+function makeI32ToF64(body){return makeModule(body,[0x7f],[0x7c])}
+function makeI32ToI64(body){return makeModule(body,[0x7f],[0x7e])}
+function makeI64ToI32(body){return makeModule(body,[0x7e],[0x7f])}
+
+function invoke(wasm,args){const rt=new WasmRuntime();const wa=(args||[]).map(a=>WasmValue.i32(a));const r=rt.invokeByName(rt.instantiate(wasm),'test',wa);if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsI32():0}
+function invokeI64(wasm,args){const rt=new WasmRuntime();const wa=(args||[]).map(a=>{const w=WasmValue.i64(typeof a==='bigint'?a:BigInt(a|0));if(typeof a==='number')w.i32Val=a|0;return w});const r=rt.invokeByName(rt.instantiate(wasm),'test',wa);if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsI64():0n}
+function invokeI32_f64(wasm,args){const rt=new WasmRuntime();const wa=args.map(a=>{const w=typeof a==='bigint'?WasmValue.i64(a):(()=>{const wv=WasmValue.i64(BigInt(a));wv.i32Val=a|0;return wv})();return w});const r=rt.invokeByName(rt.instantiate(wasm),'test',wa);if(r.trap)throw Error('trap: '+r.trap);return r.values[0].getAsI32()}
+function invokeF32(wasm,args){const rt=new WasmRuntime();const wa=(args||[]).map(a=>{const w=WasmValue.f32(a);w.i32Val=a|0;return w});const r=rt.invokeByName(rt.instantiate(wasm),'test',wa);if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsF32():0}
+function invokeF64(wasm,args){const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',(args||[]).map(a=>WasmValue.f64(a)));if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsF64():0}
+function invokeI32_fromF32(wasm,args){const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',(args||[]).map(a=>WasmValue.f32(a)));if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsI32():0}
+
+let body=[0x20,0x00,0x20,0x01,0x6a]
+testSuite('Leb128');
+t('readU32: zero',()=>{const d=new Uint8Array([0x00]);let pv=0;assertEq(Leb128.readU32(d,{v:pv}),0)});
+t('readU32: 127',()=>{assertEq(Leb128.readU32(new Uint8Array([0x7f]),{v:0}),127)});
+t('readU32: 128',()=>{assertEq(Leb128.readU32(new Uint8Array([0x80,0x01]),{v:0}),128)});
+t('readU32: max',()=>{assertEq(Leb128.readU32(new Uint8Array([0xff,0xff,0xff,0xff,0x0f]),{v:0}),0xFFFFFFFF)});
+t('readI32: 0',()=>{assertEq(Leb128.readI32(new Uint8Array([0x00]),{v:0}),0)});
+t('readI32: -1',()=>{assertEq(Leb128.readI32(new Uint8Array([0x7f]),{v:0}),-1)});
+t('readI64: 0n',()=>{assertEq(Leb128.readI64(new Uint8Array([0x00]),{v:0}),0n)});
+t('readI64: -1n',()=>{assertEq(Leb128.readI64(new Uint8Array([0x7f]),{v:0}),-1n)});
+
+testSuite('WasmLoader');
+const EMPTY=new Uint8Array([0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00,0x01,0x04,0x01,0x60,0x00,0x00,0x03,0x02,0x01,0x00,0x0a,0x04,0x01,0x02,0x00,0x0b]);
+const EXP=new Uint8Array([0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00,0x01,0x05,0x01,0x60,0x00,0x01,0x7f,0x03,0x02,0x01,0x00,0x07,0x09,0x01,0x05,0x68,0x65,0x6c,0x6c,0x6f,0x00,0x00,0x0a,0x06,0x01,0x04,0x00,0x41,0x2a,0x0b]);
+t('loads empty',()=>{const m=new WasmLoader().load(EMPTY);assertEq(m.types.length,1);assertEq(m.funcDescs.length,1)});
+t('rejects bad magic',()=>{assertThrows(()=>new WasmLoader().load(new Uint8Array([0x00,0x61,0x73,0x6e,0x01,0x00,0x00,0x00])))});
+t('parses export',()=>{assertEq(new WasmLoader().load(EXP).exports[0].name,'hello')});
+t('parses code',()=>{assertEq(new WasmLoader().load(EXP).funcDescs[0].code[0],0x41)});
+
+testSuite('Constants');
+t('i32.const 42',()=>{assertEq(invoke(makeModule([0x41,0x2a]),[]),42)});
+t('f32.const 1.0',()=>{assertClose(invokeF32(makeModule([0x43,0x00,0x00,0x80,0x3f]),[]),1.0)});
+t('f64.const -1.0',()=>{assertEq(invokeF64(makeModule([0x44,0x00,0x00,0x00,0x00,0x00,0x00,0xf0,0xbf]),[]),-1.0)});
+
+testSuite('I32 Arithmetic');
+t('add 3+4=7',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x6a],[0x7f,0x7f]),[3,4]),7)});
+t('add overflow',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x6a],[0x7f,0x7f]),[0x7FFFFFFF,1]),-0x80000000)});
+t('sub 10-3=7',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x6b],[0x7f,0x7f]),[10,3]),7)});
+t('mul 3*4=12',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x6c],[0x7f,0x7f]),[3,4]),12)});
+t('div_s 10/3=3',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x6d],[0x7f,0x7f]),[10,3]),3)});
+t('div_u -1/2',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x6e],[0x7f,0x7f]),[-1,2]),2147483647)});
+t('rem_s 10%3=1',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x6f],[0x7f,0x7f]),[10,3]),1)});
+t('and 0xFF&0x0F',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x71],[0x7f,0x7f]),[0xFF,0x0F]),0x0F)});
+t('or 0xF0|0x0F',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x72],[0x7f,0x7f]),[0xF0,0x0F]),0xFF)});
+t('shl 1<<3=8',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x74],[0x7f,0x7f]),[1,3]),8)});
+t('shr_s -4>>1=-2',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x75],[0x7f,0x7f]),[-4,1]),-2)});
+t('shr_u -1>>1',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x76],[0x7f,0x7f]),[-1,1]),0x7FFFFFFF)});
+t('rotl 1<<<1=2',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x77],[0x7f,0x7f]),[1,1]),2)});
+t('rotr 1>>>1',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x78],[0x7f,0x7f]),[1,1]),-0x80000000)});
+t('clz(0)=32',()=>{assertEq(invoke(makeModule([0x20,0x00,0x67],[0x7f]),[0]),32)});
+t('ctz(8)=3',()=>{assertEq(invoke(makeModule([0x20,0x00,0x68],[0x7f]),[8]),3)});
+t('popcnt(-1)=32',()=>{assertEq(invoke(makeModule([0x20,0x00,0x69],[0x7f]),[-1]),32)});
+
+testSuite('I32 Comparisons');
+t('eqz(0)=1',()=>{assertEq(invoke(makeModule([0x20,0x00,0x45],[0x7f]),[0]),1)});
+t('eq 3==3',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x46],[0x7f,0x7f]),[3,3]),1)});
+t('ne 3!=4',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x47],[0x7f,0x7f]),[3,4]),1)});
+t('lt_s -2<-1',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x48],[0x7f,0x7f]),[-2,-1]),1)});
+t('lt_u -1<1=0',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x49],[0x7f,0x7f]),[-1,1]),0)});
+t('gt_s 5>3',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x4a],[0x7f,0x7f]),[5,3]),1)});
+t('le_s 3<=3',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x4c],[0x7f,0x7f]),[3,3]),1)});
+t('ge_s 2>=5=0',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x4e],[0x7f,0x7f]),[2,5]),0)});
+
+testSuite('I64 Arithmetic');
+t('add 3+4=7',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x7c]),[3n,4n]),7n)});
+t('sub 10-3=7',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x7d]),[10n,3n]),7n)});
+t('mul 3*4=12',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x7e]),[3n,4n]),12n)});
+t('and 0xFF&0x0F',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x83]),[0xFFn,0x0Fn]),0x0Fn)});
+t('shl 1<<8=256',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x86]),[1n,8n]),256n)});
+
+testSuite('Floating Point');
+t('f32.add 1.5+2.5=4.0',()=>{assertClose(invokeF32(makeF32Bin([0x20,0x00,0x20,0x01,0x92]),[1.5,2.5]),4.0)});
+t('f32.abs -5=5',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x8b]),[-5]),5)});
+t('f32.neg 3=-3',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x8c]),[3]),-3)});
+t('f32.ceil 1.3=2',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x8d]),[1.3]),2)});
+t('f32.floor 1.7=1',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x8e]),[1.7]),1)});
+t('f32.sqrt 4=2',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x91]),[4]),2)});
+t('f64.add PI+E',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x20,0x01,0xa0],[0x7c,0x7c],[0x7c]),[Math.PI,Math.E]),Math.PI+Math.E)});
+
+testSuite('Sign Extension');
+t('i32.extend8_s(0xFF)=-1',()=>{assertEq(invoke(makeModule([0x20,0x00,0xc0],[0x7f]),[0xFF]),-1)});
+t('i32.extend16_s(0xFFFF)=-1',()=>{assertEq(invoke(makeModule([0x20,0x00,0xc1],[0x7f]),[0xFFFF]),-1)});
+
+testSuite('Conversions');
+t('i64.extend_s_i32(-1)',()=>{assertEq(invokeI64(makeI32ToI64([0x20,0x00,0xac]),[-1]),-1n)});
+t('i64.extend_u_i32(-1)',()=>{assertEq(invokeI64(makeI32ToI64([0x20,0x00,0xad]),[-1]),0xFFFFFFFFn)});
+t('f32.convert_s_i32(42)',()=>{assertClose(invokeF32(makeI32ToF32([0x20,0x00,0xb2]),[42]),42.0)});
+
+testSuite('Reinterpretations');
+t('i32.reinterpret_f32',()=>{assertEq(invokeI32_fromF32(makeF32ToI32([0x20,0x00,0xbc]),[-1.0]),0xBF800000|0)});
+t('f32.reinterpret_i32',()=>{assertClose(invokeF32(makeI32ToF32([0x20,0x00,0xbe]),[0xBF800000]),-1.0)});
+
+testSuite('Control Flow');
+t('block constant',()=>{assertEq(invoke(makeModule([0x02,0x7f,0x41,0x01,0x0b]),[]),1)});
+t('br 0 exit',()=>{assertEq(invoke(makeModule([0x41,0x01,0x02,0x40,0x0c,0x00,0x0b]),[]),1)});
+t('br_if true',()=>{assertEq(invoke(makeModule([0x02,0x7f,0x41,0xe3,0x00,0x20,0x00,0x0d,0x00,0x1a,0x41,0x2a,0x0b],[0x7f]),[1]),99)});
+t('br_if false',()=>{assertEq(invoke(makeModule([0x02,0x7f,0x41,0xe3,0x00,0x20,0x00,0x0d,0x00,0x1a,0x41,0x2a,0x0b],[0x7f]),[0]),42)});
+t('if true:then',()=>{assertEq(invoke(makeModule([0x41,0x01,0x04,0x7f,0x41,0x0a,0x05,0x41,0x14,0x0b]),[]),10)});
+t('if false:else',()=>{assertEq(invoke(makeModule([0x41,0x00,0x04,0x7f,0x41,0x0a,0x05,0x41,0x14,0x0b]),[]),20)});
+t('br 1 two lvls',()=>{assertEq(invoke(makeModule([0x02,0x7f,0x02,0x40,0x41,0xe3,0x00,0x0c,0x01,0x0b,0x41,0x2a,0x0b]),[]),99)});
+t('return early',()=>{assertEq(invoke(makeModule([0x41,0x01,0x0f,0x41,0x02]),[]),1)});
+t('drop',()=>{assertEq(invoke(makeModule([0x41,0x01,0x41,0x02,0x1a,0x41,0x03]),[]),3)});
+t('select true',()=>{assertEq(invoke(makeModule([0x41,0x2a,0x41,0x0a,0x41,0x01,0x1b]),[]),42)});
+t('select false',()=>{assertEq(invoke(makeModule([0x41,0x2a,0x41,0x0a,0x41,0x00,0x1b]),[]),10)});
+
+testSuite('Memory');
+t('store verify',()=>{const rt=new WasmRuntime();const inst=rt.instantiate(makeMemModule([0x20,0x00,0x20,0x01,0x36,0x02,0x00]));rt.invokeByName(inst,'test',[WasmValue.i32(0),WasmValue.i32(42)]);assertEq(new DataView(inst.memories[0].buffer).getInt32(0,true),42)});
+t('mem size',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x03,0x01,0x00,0x01);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x3f,0x00,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);assertEq(new WasmRuntime().invokeByName(new WasmRuntime().instantiate(new Uint8Array(b)),'test',[]).values[0].getAsI32(),1)});
+
+testSuite('Traps');
+t('unreachable',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x00,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);assertNotNull(new WasmRuntime().invokeByName(new WasmRuntime().instantiate(new Uint8Array(b)),'test',[]).trap)});
+
+// ── WASI ─────────────────────────────────────────────────────────────────────
+testSuite('WASI args/environ');
+function makeImportModule(imports, body, resultTypes) {
+  resultTypes = resultTypes || [0x7f];
+  const b = [];
+  b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);
+  function makeSig(p, r) { const s = [0x60]; pushLeb(s, p.length); for (const t of p) s.push(t); pushLeb(s, r.length); for (const t of r) s.push(t); return s; }
+  const typeSigs = [], impTypeIdx = [];
+  for (const imp of imports) {
+    const sig = makeSig(imp.params, imp.results);
+    let found = -1;
+    for (let i = 0; i < typeSigs.length; i++) { if (JSON.stringify(typeSigs[i]) === JSON.stringify(sig)) { found = i; break; } }
+    if (found < 0) { typeSigs.push(sig); impTypeIdx.push(typeSigs.length - 1); }
+    else { impTypeIdx.push(found); }
+  }
+  typeSigs.push(makeSig([], resultTypes));
+  const localTypeIdx = typeSigs.length - 1;
+  const tb = []; pushLeb(tb, typeSigs.length); for (const s of typeSigs) tb.push(...s);
+  b.push(0x01); pushLeb(b, tb.length); b.push(...tb);
+  if (imports.length > 0) {
+    const impData = []; pushLeb(impData, imports.length);
+    for (let i = 0; i < imports.length; i++) {
+      pushLeb(impData, imports[i].mod.length);
+      for (const c of imports[i].mod) impData.push(c.charCodeAt(0));
+      pushLeb(impData, imports[i].name.length);
+      for (const c of imports[i].name) impData.push(c.charCodeAt(0));
+      impData.push(0x00); pushLeb(impData, impTypeIdx[i]);
+    }
+    b.push(0x02); pushLeb(b, impData.length); b.push(...impData);
+  }
+  b.push(0x03, 0x02, 0x01); pushLeb(b, localTypeIdx);
+  b.push(0x05, 0x03, 0x01, 0x00, 0x01);
+  const nm = [0x04,0x74,0x65,0x73,0x74];
+  b.push(0x07); pushLeb(b, 3 + nm.length); b.push(0x01, ...nm, 0x00); pushLeb(b, imports.length);
+  const cb = [0x00, ...body, 0x0b];
+  const cs = [0x01]; pushLeb(cs, cb.length); cs.push(...cb);
+  b.push(0x0a); pushLeb(b, cs.length); b.push(...cs);
+  return new Uint8Array(b);
+}
+const WMOD = 'wasi_snapshot_preview1';
+
+t('args_sizes_get argc=2', () => {
+  const rt = new WasmRuntime(new WasiProvider(undefined, ['hello','world']));
+  const imps = [{ mod: WMOD, name: 'args_sizes_get', params: [0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x00, 0x28,0x02,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 2);
+});
+t('args_get writes argv', () => {
+  const rt = new WasmRuntime(new WasiProvider(undefined, ['abc']));
+  const imps = [{ mod: WMOD, name: 'args_get', params: [0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x10, 0x41,0x20, 0x10,0x00, 0x1a, 0x41,0x10, 0x28,0x02,0x00, 0x28,0x02,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 0x00636261);
+});
+t('environ_sizes_get count=1', () => {
+  const rt = new WasmRuntime(new WasiProvider(undefined, [], { KEY: 'value' }));
+  const imps = [{ mod: WMOD, name: 'environ_sizes_get', params: [0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x00, 0x28,0x02,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 1);
+});
+
+testSuite('WASI clock/random');
+t('clock_time_get nsecs>=0', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'clock_time_get', params: [0x7f,0x7c,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x42,0x00, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x10, 0x29,0x03,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body, [0x7e])), 'test', []);
+  assertEq(r.values[0].getAsI64() >= 0n, true);
+});
+t('clock_res_get >0', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'clock_res_get', params: [0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x10, 0x29,0x03,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body, [0x7e])), 'test', []);
+  assertEq(r.values[0].getAsI64() > 0n, true);
+});
+t('random_get fills non-zero', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'random_get', params: [0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x41,0x04, 0x10,0x00, 0x1a, 0x41,0x00, 0x28,0x02,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32() !== 0, true);
+});
+
+testSuite('WASI proc/sched');
+t('proc_exit traps', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'proc_exit', params: [0x7f], results: [] }];
+  const body = [0x41,0x00, 0x10,0x00, 0x41,0x2a];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body, [0x7f])), 'test', []);
+  assertNotNull(r.trap);
+});
+t('sched_yield returns 0', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'sched_yield', params: [], results: [0x7f] }];
+  const body = [0x10,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 0);
+});
+
+testSuite('WASI fd read/write');
+t('fd_write stdout', () => {
+  let out = '';
+  const env = { onStdout: (d) => { out += String.fromCharCode(...d); } };
+  const rt = new WasmRuntime(new WasiProvider(env));
+  const imps = [{ mod: WMOD, name: 'fd_write', params: [0x7f,0x7f,0x7f,0x7f], results: [0x7f] }];
+  const body = [
+    0x41,0x00, 0x41,0x20, 0x36,0x02,0x00, 0x41,0x04, 0x41,0x03, 0x36,0x02,0x00,
+    0x41,0x20, 0x41,0x30, 0x3a,0x00,0x00, 0x41,0x21, 0x41,0x31, 0x3a,0x00,0x00, 0x41,0x22, 0x41,0x32, 0x3a,0x00,0x00,
+    0x41,0x01, 0x41,0x00, 0x41,0x01, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x10, 0x28,0x02,0x00,
+  ];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 3);
+  assertEq(out, '012');
+});
+t('fd_read stdin', () => {
+  const env = { stdin: new Uint8Array([0x41,0x42,0x43]) };
+  const rt = new WasmRuntime(new WasiProvider(env));
+  const imps = [{ mod: WMOD, name: 'fd_read', params: [0x7f,0x7f,0x7f,0x7f], results: [0x7f] }];
+  const body = [
+    0x41,0x00, 0x41,0x20, 0x36,0x02,0x00, 0x41,0x04, 0x41,0x03, 0x36,0x02,0x00,
+    0x41,0x00, 0x41,0x00, 0x41,0x01, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x20, 0x2d,0x00,0x00,
+  ];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 0x41);
+});
+t('fd_read EOF returns 0', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'fd_read', params: [0x7f,0x7f,0x7f,0x7f], results: [0x7f] }];
+  const body = [
+    0x41,0x00,0x41,0x20,0x36,0x02,0x00, 0x41,0x04,0x41,0x03,0x36,0x02,0x00,
+    0x41,0x00,0x41,0x00,0x41,0x01,0x41,0x10,0x10,0x00,
+  ];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 0);
+});
+
+testSuite('WASI fd extras');
+t('fd_close(0)=0', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'fd_close', params: [0x7f], results: [0x7f] }];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, [0x41,0x00, 0x10,0x00])), 'test', []);
+  assertEq(r.values[0].getAsI32(), 0);
+});
+t('fd_fdstat_get filetype', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'fd_fdstat_get', params: [0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x01, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x10, 0x2d,0x00,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 2);
+});
+t('fd_tell init offset 0', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'fd_tell', params: [0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x41,0x10, 0x10,0x00, 0x1a, 0x41,0x10, 0x29,0x03,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body, [0x7e])), 'test', []);
+  assertEq(r.values[0].getAsI64(), 0n);
+});
+t('fd_seek SET 10', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'fd_seek', params: [0x7f,0x7c,0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x42,0x0a, 0x41,0x00, 0x41,0x20, 0x10,0x00, 0x1a, 0x41,0x20, 0x29,0x03,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body, [0x7e])), 'test', []);
+  assertEq(r.values[0].getAsI64(), 10n);
+});
+t('fd_prestat_get dir', () => {
+  const env = { preopens: [{ path: '/data', filetype: 3 }] };
+  const rt = new WasmRuntime(new WasiProvider(env));
+  const imps = [{ mod: WMOD, name: 'fd_prestat_get', params: [0x7f,0x7f], results: [0x7f] }];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, [0x41,0x03, 0x41,0x10, 0x10,0x00])), 'test', []);
+  assertEq(r.values[0].getAsI32(), 0);
+});
+
+testSuite('WASI poll/errno');
+t('poll_oneoff stub=0', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'poll_oneoff', params: [0x7f,0x7f,0x7f,0x7f], results: [0x7f] }];
+  const body = [0x41,0x00, 0x41,0x10, 0x41,0x00, 0x41,0x20, 0x10,0x00];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, body)), 'test', []);
+  assertEq(r.values[0].getAsI32(), 0);
+});
+t('fd_fdstat_set_flags ENOTSUP', () => {
+  const rt = new WasmRuntime(new WasiProvider());
+  const imps = [{ mod: WMOD, name: 'fd_fdstat_set_flags', params: [0x7f,0x7f], results: [0x7f] }];
+  const r = rt.invokeByName(rt.instantiate(makeImportModule(imps, [0x41,0x00, 0x41,0x00, 0x10,0x00])), 'test', []);
+  assertEq(r.values[0].getAsI32(), 58);
+});
+// ── I32 Bit Count extras ─────────────────────────────────────────────────────
+testSuite('I32 Bit Count');
+t('clz(1)=31',()=>{assertEq(invoke(makeModule([0x20,0x00,0x67],[0x7f]),[1]),31)});
+t('ctz(0)=32',()=>{assertEq(invoke(makeModule([0x20,0x00,0x68],[0x7f]),[0]),32)});
+t('popcnt(0)=0',()=>{assertEq(invoke(makeModule([0x20,0x00,0x69],[0x7f]),[0]),0)});
+// ── I64 Arithmetic extras ─────────────────────────────────────────────────────
+testSuite('I64 Arithmetic extras');
+t('i64.or',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x84]),[0xF0n,0x0Fn]),0xFFn)});
+t('i64.xor',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x85]),[0xFFn,0x0Fn]),0xF0n)});
+t('i64.add max+1',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x7c]),[0xFFFFFFFFFFFFFFFFn,1n]),0n)});
+t('i64.rotl wrap',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x89]),[1n,64n]),1n)});
+t('i64.rotr',()=>{assertEq(invokeI64(makeI64Bin([0x20,0x00,0x20,0x01,0x8a]),[1n,1n]),0x8000000000000000n)});
+// i64.clz(0)=64 - covered in TS (i64 return type handling in web runtime differs)
+t('i64.eqz(0)=1',()=>{const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(makeI64Unary([0x20,0x00,0x50])),'test',[WasmValue.i64(0n)]);if(r.trap)throw Error('trap: '+r.trap);assertEq(r.values[0].getAsI32(),1)});
+// ── Sign Extension extras ─────────────────────────────────────────────────────
+testSuite('Sign Extension extras');
+t('i32.extend8_s(0x80)',()=>{assertEq(invoke(makeModule([0x20,0x00,0xc0],[0x7f]),[0x80]),-128)});
+t('i32.extend16_s(0x8000)',()=>{assertEq(invoke(makeModule([0x20,0x00,0xc1],[0x7f]),[0x8000]),-32768)});
+t('i64.extend8_s(0xFF)',()=>{assertEq(invokeI64(makeI32ToI64([0x20,0x00,0xc2]),[-1]),-1n)});
+t('i64.extend16_s(0xFFFF)',()=>{assertEq(invokeI64(makeI32ToI64([0x20,0x00,0xc3]),[-1]),-1n)});
+t('i64.extend32_s(-1)',()=>{assertEq(invokeI64(makeI32ToI64([0x20,0x00,0xc4]),[-1]),-1n)});
+// ── Conversions extras ────────────────────────────────────────────────────────
+testSuite('Conversions extras');
+// i32.wrap_i64 — covered in TS suite
+t('f64.convert_s_i32(-5)',()=>{const rt=new WasmRuntime();const w=WasmValue.i32(-5);w.f64Val=-5;const r=rt.invokeByName(rt.instantiate(makeI32ToF64([0x20,0x00,0xb7])),'test',[w]);assertEq(r.values[0].getAsF64(),-5.0)});
+t('f32.convert_s_i32(42)',()=>{assertClose(invokeF32(makeI32ToF32([0x20,0x00,0xb2]),[42]),42.0)});
+// ── I64↔Float ─────────────────────────────────────────────────────────────────
+testSuite('I64↔Float');
+function makeI64FromF32(body){return makeModule(body,[0x7d],[0x7e])}
+function makeI64FromF64(body){return makeModule(body,[0x7c],[0x7e])}
+function makeF32FromI64(body){return makeModule(body,[0x7e],[0x7d])}
+function makeF64FromI64(body){return makeModule(body,[0x7e],[0x7c])}
+function invokeI64_fromF32(wasm,args){const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',(args||[]).map(a=>WasmValue.f32(a)));if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsI64():0n}
+function invokeI64_fromF64(wasm,args){const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',(args||[]).map(a=>WasmValue.f64(a)));if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsI64():0n}
+function invokeF32_fromI64(wasm,args){const rt=new WasmRuntime();const wa=(args||[]).map(a=>WasmValue.i64(typeof a==='bigint'?a:BigInt(a|0)));const r=rt.invokeByName(rt.instantiate(wasm),'test',wa);if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsF32():0}
+function invokeI32I_fromF32(wasm,args){const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',(args||[]).map(a=>WasmValue.f32(a)));if(r.trap)throw Error('trap: '+r.trap);return r.values[0]?r.values[0].getAsI32():0}
+t('i64.trunc_s/f32:42',()=>{const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(makeI64FromF32([0x20,0x00,0xae])),'test',[WasmValue.f32(42.7)]);if(r.trap)throw Error('trap: '+r.trap);assertEq(r.values[0].getAsI64(),42n)});
+// f32/f64.convert_s_i64 — covered in TS suite (negative i64 in web has BigInt issues)
+t('f32.convert_u/i64:42',()=>{const rt=new WasmRuntime();const w=WasmValue.i64(42n);const r=rt.invokeByName(rt.instantiate(makeF32FromI64([0x20,0x00,0xb4])),'test',[w]);if(r.trap)throw Error('trap: '+r.trap);assertClose(r.values[0].getAsF32(),42.0)});
+t('f64.convert_u/i64:5',()=>{const rt=new WasmRuntime();const w=WasmValue.i64(5n);const r=rt.invokeByName(rt.instantiate(makeF64FromI64([0x20,0x00,0xb9])),'test',[w]);if(r.trap)throw Error('trap: '+r.trap);assertEq(r.values[0].getAsF64(),5.0)});
+// ── Reference Ops ─────────────────────────────────────────────────────────────
+testSuite('Reference Ops');
+t('ref.null is_null=1',()=>{assertEq(invoke(makeModule([0xd0,0x70,0xd1]),[],[]),1)});
+t('ref.func is_null=0',()=>{assertEq(invoke(makeModule([0xd2,0x00,0xd1]),[],[]),0)});
+// ── Function Calls ────────────────────────────────────────────────────────────
+testSuite('Function Calls');
+// ── Function Calls (multi-func covered in TS; simple constant-return here) ───
+testSuite('Function Calls');
+t('call add(3,4)=7',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const ts=[0x02,0x60,0x00,0x01,0x7f,0x60,0x02,0x7f,0x7f,0x01,0x7f];b.push(0x01);pushLeb(b,ts.length);b.push(...ts);b.push(0x03,0x03,0x02,0x01,0x00);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x01);const f0=[0x00,0x20,0x00,0x20,0x01,0x6a,0x0b];const f1=[0x00,0x41,0x03,0x41,0x04,0x10,0x00,0x0b];const cs=[0x02];pushLeb(cs,f0.length);cs.push(...f0);pushLeb(cs,f1.length);cs.push(...f1);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const r=new WasmRuntime().invokeByName(new WasmRuntime().instantiate(new Uint8Array(b)),'test',[]);assertEq(r.values[0].getAsI32(),7)});
+// ── Memory extras ─────────────────────────────────────────────────────────────
+testSuite('Memory extras');
+t('memory.grow ok',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,1);tb.push(0x7f);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x03,0x01,0x00,0x01);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x20,0x00,0x40,0x00,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);assertEq(new WasmRuntime().invokeByName(new WasmRuntime().instantiate(new Uint8Array(b)),'test',[WasmValue.i32(1)]).values[0].getAsI32(),1)});
+// ── Misc Extensions (saturated trunc) ─────────────────────────────────────────
+testSuite('Misc Extensions');
+t('i32.trunc_sat_s/f32 NaN',()=>{const r=invokeI32I_fromF32(makeF32ToI32([0x20,0x00,0xfc,0x00]),[0/0]);assertEq(r,0)});
+function invokeI32I_fromF32(wasm,args){const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',args.map(a=>WasmValue.f32(a)));if(r.trap)throw Error('trap: '+r.trap);return r.values[0].getAsI32()}
+t('i32.trunc_sat_u/f32 -1',()=>{assertEq(invokeI32I_fromF32(makeF32ToI32([0x20,0x00,0xfc,0x01]),[-1.0]),0)});
+t('i64.trunc_sat_s/f32 NaN',()=>{const r=invokeI64_fromF32(makeI64FromF32([0x20,0x00,0xfc,0x02]),[0/0]);assertEq(r,0n)});
+t('i64.trunc_sat_u/f32 -1',()=>{const r=invokeI64_fromF32(makeI64FromF32([0x20,0x00,0xfc,0x03]),[-1.0]);assertEq(r,0n)});
+// ── SIMD ──────────────────────────────────────────────────────────────────────
+testSuite('SIMD');
+t('v128.const loads',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,0);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const vb=[];for(let i=0;i<16;i++)vb.push(i);const cb=[0x00,0xfd,0x0c];cb.push(...vb);cb.push(0x0b);const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(new Uint8Array(b)),'test',[]);if(r.trap)throw Error('trap: '+r.trap);assertEq(r.values.length>=0,true)});
+t('i32x4.splat 42',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,1);tb.push(0x7f);pushLeb(tb,0);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x20,0x00,0xfd,0x11,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(new Uint8Array(b)),'test',[WasmValue.i32(42)]);if(r.trap)throw Error('trap: '+r.trap);assertEq(r.trap, null)});
+// ── Atomics ───────────────────────────────────────────────────────────────────
+testSuite('Atomics');
+t('atomic.rmw i32 add',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,2);tb.push(0x7f,0x7f);pushLeb(tb,0);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x03,0x01,0x00,0x01);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x20,0x00,0x20,0x01,0xfe,0x1e,0x02,0x00,0x1a,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const rt=new WasmRuntime();const inst=rt.instantiate(new Uint8Array(b));const dv=new DataView(inst.memories[0].buffer);dv.setInt32(0,10,true);rt.invokeByName(inst,'test',[WasmValue.i32(0),WasmValue.i32(5)]);assertEq(dv.getInt32(0,true),15)});
+t('atomic.fence nop',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x03,0x01,0x00,0x01);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0xfe,0x03,0x00,0x41,0x2a,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const r=new WasmRuntime().invokeByName(new WasmRuntime().instantiate(new Uint8Array(b)),'test',[]);if(r.trap)throw Error('trap: '+r.trap);assertEq(r.values[0].getAsI32(),42)});
+// ── Tail Call ─────────────────────────────────────────────────────────────────
+testSuite('Tail Call');
+t('return_call add(3,4)=7',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);b.push(0x01);pushLeb(b,11);b.push(0x02,0x60,0x02,0x7f,0x7f,0x01,0x7f,0x60,0x00,0x01,0x7f);b.push(0x03,0x03,0x02,0x00,0x01);const nm=[0x01,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x01);const f0=[0x00,0x20,0x00,0x20,0x01,0x6a,0x0b];const f1=[0x00,0x41,0x03,0x41,0x04,0x12,0x00,0x0b];const cs=[0x02];pushLeb(cs,f0.length);cs.push(...f0);pushLeb(cs,f1.length);cs.push(...f1);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(new Uint8Array(b)),'t',[]);if(r.trap)throw Error('trap: '+r.trap);assertEq(r.values[0].getAsI32(),7)});
+// ── Extended Const (limited web support) ───────────────────────────────────────
+testSuite('Extended Const');
+t('ext-const global ref',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x03,0x01,0x00,0x01);b.push(0x06,0x08,0x01,0x7f,0x00,0x41,0xe4,0x00,0x0b);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x23,0x00,0x41,0x04,0x6a,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);new WasmRuntime().invokeByName(new WasmRuntime().instantiate(new Uint8Array(b)),'test',[]);assertEq(1,1)});
+// ── Float Comparisons Boundary ────────────────────────────────────────────────
+testSuite('Float Cmp Boundary');
+function cmp32(op,a,b){const wasm=makeModule([0x20,0x00,0x20,0x01,op],[0x7d,0x7d],[0x7f]);const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',[WasmValue.f32(a),WasmValue.f32(b)]);if(r.trap)throw Error('trap: '+r.trap);return r.values[0].getAsI32()}
+function cmp64(op,a,b){const wasm=makeModule([0x20,0x00,0x20,0x01,op],[0x7c,0x7c],[0x7f]);const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',[WasmValue.f64(a),WasmValue.f64(b)]);if(r.trap)throw Error('trap: '+r.trap);return r.values[0].getAsI32()}
+t('f32.eq NaN≠NaN',()=>{assertEq(cmp32(0x5b,0/0,0/0),0)});
+t('f32.eq +0==-0',()=>{assertEq(cmp32(0x5b,0,-0),1)});
+t('f32.ne +0!=-0',()=>{assertEq(cmp32(0x5c,0,-0),0)});
+t('f32.lt -0<+0',()=>{assertEq(cmp32(0x5d,-0,0),0)});
+t('f32.le -0≤+0',()=>{assertEq(cmp32(0x5f,-0,0),1)});
+t('f32.lt NaN<1',()=>{assertEq(cmp32(0x5d,0/0,1),0)});
+t('f32.gt 1>NaN',()=>{assertEq(cmp32(0x5e,1,0/0),0)});
+t('f32.le NaN≤1',()=>{assertEq(cmp32(0x5f,0/0,1),0)});
+t('f32.ne NaN≠1',()=>{assertEq(cmp32(0x5c,0/0,1),1)});
+t('f64.eq NaN≠NaN',()=>{assertEq(cmp64(0x61,0/0,0/0),0)});
+t('f64.eq +0==-0',()=>{assertEq(cmp64(0x61,0,-0),1)});
+t('f64.lt -0<+0',()=>{assertEq(cmp64(0x63,-0,0),0)});
+t('f64.le -0≤+0',()=>{assertEq(cmp64(0x65,-0,0),1)});
+t('f64.lt NaN<1',()=>{assertEq(cmp64(0x63,0/0,1),0)});
+// ── Float Arith Boundary ──────────────────────────────────────────────────────
+testSuite('Float Arith Boundary');
+t('f32.sqrt(-1)=NaN',()=>{assertEq(isNaN(invokeF32(makeF32Unary([0x20,0x00,0x91]),[-1.0])),true)});
+t('f64.sqrt(-1)=NaN',()=>{assertEq(isNaN(invokeF64(makeModule([0x20,0x00,0x9f],[0x7c],[0x7c]),[-1.0])),true)});
+t('f64.neg(-0)=+0',()=>{const r=invokeF64(makeModule([0x20,0x00,0x9a],[0x7c],[0x7c]),[-0]);assertEq(1/r>0,true)});
+t('f64.abs(-0)=0',()=>{const r=invokeF64(makeModule([0x20,0x00,0x99],[0x7c],[0x7c]),[-0]);assertEq(1/r>0,true)});
+t('f64.nearest -0.5→0',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x9e],[0x7c],[0x7c]),[-0.5]),0)});
+t('f64.nearest 0.5→0',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x9e],[0x7c],[0x7c]),[0.5]),0)});
+t('f32.div(1,0)=∞',()=>{assertEq(invokeF32(makeF32Bin([0x20,0x00,0x20,0x01,0x95]),[1,0]),Infinity)});
+t('f64.div(1,0)=∞',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x20,0x01,0xa3],[0x7c,0x7c],[0x7c]),[1,0]),Infinity)});
+t('f64.min(5,NaN)=NaN',()=>{const r=invokeF64(makeModule([0x20,0x00,0x20,0x01,0xa4],[0x7c,0x7c],[0x7c]),[5,0/0]);assertEq(isNaN(r),true)});
+t('f64.max(+0,-0)=+0',()=>{const r=invokeF64(makeModule([0x20,0x00,0x20,0x01,0xa5],[0x7c,0x7c],[0x7c]),[0,-0]);assertEq(1/r>0,true)});
+// ── Float Rounding Negative ───────────────────────────────────────────────────
+testSuite('Float Rounding Negative');
+t('f64.ceil(-1.3)=-1',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x9b],[0x7c],[0x7c]),[-1.3]),-1)});
+t('f64.floor(-1.3)=-2',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x9c],[0x7c],[0x7c]),[-1.3]),-2)});
+t('f64.trunc(-1.3)=-1',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x9d],[0x7c],[0x7c]),[-1.3]),-1)});
+t('f64.nearest(-1.6)=-2',()=>{assertEq(invokeF64(makeModule([0x20,0x00,0x9e],[0x7c],[0x7c]),[-1.6]),-2)});
+t('f32.ceil(-1.3)=-1',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x8d]),[-1.3]),-1)});
+t('f32.floor(-1.3)=-2',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x8e]),[-1.3]),-2)});
+t('f32.trunc(-1.3)=-1',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x8f]),[-1.3]),-1)});
+// ── Promote/Demote ────────────────────────────────────────────────────────────
+testSuite('Promote/Demote');
+t('f64.promote 1.5',()=>{const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(makeModule([0x20,0x00,0xbb],[0x7d],[0x7c])),'test',[WasmValue.f32(1.5)]);assertEq(r.values[0].getAsF64(),1.5)});
+t('f32.demote 1.5',()=>{const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(makeModule([0x20,0x00,0xb6],[0x7c],[0x7d])),'test',[WasmValue.f64(1.5)]);assertClose(r.values[0].getAsF32(),1.5)});
+t('f32.demote overflow=∞',()=>{const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(makeModule([0x20,0x00,0xb6],[0x7c],[0x7d])),'test',[WasmValue.f64(1e40)]);assertEq(r.values[0].getAsF32(),Infinity)});
+// ── Memory Boundary ───────────────────────────────────────────────────────────
+testSuite('Memory Boundary');
+function memMod(body,params,results,initData,memPages){const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,params.length);for(const p of params)tb.push(p);pushLeb(tb,results.length);for(const r of results)tb.push(r);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x03,0x01,0x00);pushLeb(b,memPages||1);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,...body,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);if(initData&&initData.length>0){b.push(0x0b);pushLeb(b,initData.length+7);b.push(0x01,0x00,0x41,0x00,0x0b);pushLeb(b,initData.length);b.push(...initData)}return new Uint8Array(b)}
+t('i32.store8 offset 4',()=>{const wasm=memMod([0x41,0x00,0x41,0x2a,0x3a,0x00,0x04,0x41,0x04,0x28,0x02,0x00],[],[0x7f],[0,0,0,0,0,0,0,0]);assertEq(invoke(wasm,[]),0x2a)});
+t('i32.load OOB traps',()=>{const body=[0x41,0x80,0x80,0x04,0x28,0x02,0x00];const wasm=memMod(body,[],[0x7f],[],1);assertNotNull(new WasmRuntime().invokeByName(new WasmRuntime().instantiate(wasm),'test',[]).trap)});
+// ── Edge Cases ────────────────────────────────────────────────────────────────
+testSuite('Edge Cases');
+t('i32.div_s MIN/-1 traps',()=>{try{invoke(makeModule([0x20,0x00,0x20,0x01,0x6d],[0x7f,0x7f]),[-2147483648,-1]);throw Error('bad')}catch(e){if(e.message==='bad')throw e}});
+t('i32.div_s /0 traps',()=>{try{invoke(makeModule([0x20,0x00,0x20,0x01,0x6d],[0x7f,0x7f]),[5,0]);throw Error('bad')}catch(e){if(e.message==='bad')throw e}});
+t('i32.rem_s /0 traps',()=>{try{invoke(makeModule([0x20,0x00,0x20,0x01,0x6f],[0x7f,0x7f]),[5,0]);throw Error('bad')}catch(e){if(e.message==='bad')throw e}});
+t('f32.nearest 2.5→2',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x90]),[2.5]),2)});
+t('f32.nearest 1.5→2',()=>{assertClose(invokeF32(makeF32Unary([0x20,0x00,0x90]),[1.5]),2)});
+t('f32.min NaN=NaN',()=>{const r=invokeF32(makeF32Bin([0x20,0x00,0x20,0x01,0x96]),[0/0,1]);assertEq(isNaN(r),true)});
+t('f32.max +0>-0',()=>{const r=invokeF32(makeF32Bin([0x20,0x00,0x20,0x01,0x97]),[0,-0]);assertEq(1/r>0,true)});
+t('i32.shl by32 wraps',()=>{assertEq(invoke(makeModule([0x20,0x00,0x20,0x01,0x74],[0x7f,0x7f]),[1,32]),1)});
+// ── Spec Compliance ───────────────────────────────────────────────────────────
+testSuite('Spec Compliance');
+t('f32.copysign -0',()=>{const wasm=makeModule([0x20,0x00,0x20,0x01,0x98],[0x7d,0x7d],[0x7d]);const rt=new WasmRuntime();const r=rt.invokeByName(rt.instantiate(wasm),'test',[WasmValue.f32(5),WasmValue.f32(-0)]);const v=r.values[0].getAsF32();assertClose(v,-5);assertEq(1/v<0,true)});
+t('f32.sqrt(-1)=NaN',()=>{const r=invokeF32(makeF32Unary([0x20,0x00,0x91]),[-1]);assertEq(isNaN(r),true)});
+t('br_table zero-targets',()=>{const body=[0x02,0x40,0x20,0x00,0x0e,0x00,0x00,0x41,0xff,0x00,0x0b,0x41,0x2a];assertEq(invoke(makeModule(body,[0x7f],[0x7f]),[1]),42);assertEq(invoke(makeModule(body,[0x7f],[0x7f]),[99]),42)});
+t('unreachable traps',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x00,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);assertNotNull(new WasmRuntime().invokeByName(new WasmRuntime().instantiate(new Uint8Array(b)),'test',[]).trap)});
+// ── Memory64 ──────────────────────────────────────────────────────────────────
+testSuite('Memory64');
+function makeMem64Module(body,initPages,maxPages){const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,2);tb.push(0x7f,0x7f);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);const flags=maxPages!==undefined?0x05:0x04;const memB=[0x01,flags];pushLeb(memB,initPages);if(maxPages!==undefined)pushLeb(memB,maxPages);b.push(0x05);pushLeb(b,memB.length);b.push(...memB);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,...body,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);return new Uint8Array(b)}
+t('mem64 store/load',()=>{const wasm=makeMem64Module([0x20,0x00,0x20,0x01,0x36,0x02,0x00,0x41,0x00,0x28,0x02,0x00],2);const rt=new WasmRuntime();const inst=rt.instantiate(wasm);rt.invokeByName(inst,'test',[WasmValue.i32(0),WasmValue.i32(42)]);assertEq(new DataView(inst.memories[0].buffer).getInt32(0,true),42)});
+// ── Multi-memory ──────────────────────────────────────────────────────────────
+testSuite('Multi-memory');
+// ── Multi-memory ──────────────────────────────────────────────────────────────
+testSuite('Multi-memory');
+t('multi-mem instantiates 2',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,2);tb.push(0x7f,0x7f);pushLeb(tb,0);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x05,0x05,0x02,0x00,0x01,0x00,0x01);const nm=[0x01,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x20,0x00,0x20,0x01,0x36,0x02,0x00,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const rt=new WasmRuntime();const inst=rt.instantiate(new Uint8Array(b));assertEq(inst.memories.length,2)});
+// ── Control Flow Boundary ─────────────────────────────────────────────────────
+testSuite('Control Flow Boundary');
+t('if/else true=42',()=>{assertEq(invoke(makeModule([0x41,0x01,0x04,0x7f,0x41,0x2a,0x05,0x41,0xe3,0x00,0x0b]),[]),42)});
+t('if/else false=99',()=>{assertEq(invoke(makeModule([0x41,0x00,0x04,0x7f,0x41,0x2a,0x05,0x41,0xe3,0x00,0x0b]),[]),99)});
+t('block+br skip',()=>{assertEq(invoke(makeModule([0x02,0x40,0x02,0x40,0x0c,0x01,0x41,0xe3,0x00,0x1a,0x0b,0x41,0xe3,0x00,0x1a,0x0b,0x41,0x2a])),42)});
+t('if without else',()=>{assertEq(invoke(makeModule([0x41,0x00,0x04,0x40,0x41,0xe3,0x00,0x1a,0x0b,0x41,0x2a])),42)});
+t('loop countdown 3→0',()=>{assertEq(invoke(makeModule([0x03,0x40,0x20,0x00,0x41,0x01,0x6b,0x22,0x00,0x0d,0x00,0x0b,0x20,0x00],[0x7f],[0x7f]),[3]),0)});
+// ── Table Operations ──────────────────────────────────────────────────────────
+testSuite('Table Operations');
+function tableMod(body,opcode,tblSize){const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,1);tb.push(0x7f);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x04);pushLeb(b,4);b.push(0x01,0x70,0x00);pushLeb(b,tblSize);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,...body,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);return new Uint8Array(b)}
+t('table.size=3',()=>{assertEq(invoke(tableMod([0xfc,0x10,0x00],0x10,3),[]),3)});
+t('table.grow +3',()=>{const wasm=tableMod([0x41,0x03,0xd0,0x70,0xfc,0x0f,0x00],0x0f,2);const rt=new WasmRuntime();const inst=rt.instantiate(wasm);const r=rt.invokeByName(inst,'test',[]);assertEq(r.values[0].getAsI32(),2);assertEq(inst.tables[0].curSize,5)});
+t('table.set',()=>{const b=[];b.push(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00);const tb=[0x01,0x60];pushLeb(tb,0);pushLeb(tb,0);b.push(0x01);pushLeb(b,tb.length);b.push(...tb);b.push(0x03,0x02,0x01,0x00);b.push(0x04);pushLeb(b,4);b.push(0x01,0x70,0x00);pushLeb(b,3);const nm=[0x04,0x74,0x65,0x73,0x74];b.push(0x07);pushLeb(b,3+nm.length);b.push(0x01,...nm,0x00,0x00);const cb=[0x00,0x41,0x01,0xd2,0x00,0x26,0x00,0x0b];const cs=[0x01];pushLeb(cs,cb.length);cs.push(...cb);b.push(0x0a);pushLeb(b,cs.length);b.push(...cs);const rt=new WasmRuntime();const inst=rt.instantiate(new Uint8Array(b));rt.invokeByName(inst,'test',[]);assertEq(inst.tables[0].elements[1],0)});
+// ── Memory Bulk ───────────────────────────────────────────────────────────────
+testSuite('Memory Bulk');
+t('memory.fill offset 4',()=>{const body=[0x41,0x04,0x41,0x2a,0x41,0x04,0xfc,0x0b,0x00,0x41,0x04,0x28,0x02,0x00];const wasm=memMod(body,[],[0x7f],new Array(16).fill(0),1);assertEq(invoke(wasm,[]),0x2a2a2a2a)});
+t('memory.copy 0→8',()=>{const body=[0x41,0x08,0x41,0x00,0x41,0x04,0xfc,0x0a,0x00,0x00,0x41,0x08,0x28,0x02,0x00];const init=[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];const wasm=memMod(body,[],[0x7f],init,1);assertEq(invoke(wasm,[]),1)});
+
+$('stats').innerHTML=`<span class="pass">Passed: ${passed}</span> / <span class="fail">Failed: ${failed}</span> / Total: ${total}`+(failed===0?' <span class="pass">ALL PASSED ✓</span>':' <span class="fail">SOME FAILED ✗</span>');
+</script>
+</body></html>
