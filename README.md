@@ -3,7 +3,7 @@
 > WebAssembly Micro Runtime 的纯 TypeScript/ArkTS 移植。  
 > Interpreter-only · 263 测试 · 零原生依赖 · 浏览器 / 鸿蒙元服务
 
-基于 [bytecodealliance/wasm-micro-runtime](https://github.com/bytecodealliance/wasm-micro-runtime) 经典解释器架构。
+参考 [bytecodealliance/wasm-micro-runtime](https://github.com/bytecodealliance/wasm-micro-runtime) 经典解释器架构实现的鸿蒙元服务WASM运行时。
 
 ---
 
@@ -262,22 +262,86 @@ throw new HostTrap('wasi: exit(0)');  // → Wasm 执行终止
 ### 使用
 
 ```typescript
-import { WasiProvider } from './wasm/wasi/WasiProvider';
 import { WasiProvider } from 'arkwasm';
 
-const wasi = new WasiProvider({
-  args: ['./app', '--verbose'],
-  environ: { HOME: '/data' },
-  preopens: [{ path: '/data', filetype: 3 }],
-  // 鸿蒙 App 注入 @ohos.* 回调:
-  // fsOpen: (path, oflags) => { const f = fileIo.openSync(path); return f.fd; },
-  // fsRead: (fd, buf, offset) => fileIo.readSync(fd, buf.buffer, { offset: Number(offset) }),
-  // ...
-});
-
+const wasi = new WasiProvider(undefined, ['./app', '--verbose'], { HOME: '/data' });
 const rt = new WasmRuntime(wasi);
 try { rt.invokeByName(rt.instantiate(wasiWasm), '_start', []); }
 catch (e) { if (e instanceof HostTrap) console.log('exit'); }
+```
+
+### 各环境 WasmEnv 实现示例
+
+#### 鸿蒙元服务（完整文件系统 + 随机数 + 时钟）
+
+创建 `HarmonyWasiEnv.ets`，参考 [`entry/src/main/ets/wasm/wasi/HarmonyWasiEnv.ets`](entry/src/main/ets/wasm/wasi/HarmonyWasiEnv.ets)：
+
+```typescript
+import { WasiProvider } from 'arkwasm';
+import { createHarmonyWasiEnv } from './HarmonyWasiEnv';
+import { common } from '@kit.AbilityKit';
+
+// 在 UIAbility / Component 中：
+const ctx = getContext(this) as common.UIAbilityContext;
+const wasi = new WasiProvider(createHarmonyWasiEnv(ctx), ['./app'], {});
+
+const rt = new WasmRuntime(wasi);
+const rm = ctx.resourceManager;
+const raw = await rm.getRawFileContent('module.wasm');
+const inst = rt.instantiate(new Uint8Array(raw.buffer));
+
+try { rt.invokeByName(inst, '_start', []); }
+catch (e) { if (e instanceof HostTrap) hilog.info(0, 'wasi', 'exit'); }
+```
+
+#### 浏览器（最小实现）
+
+```typescript
+import { WasmRuntime, WasiProvider, WasiEnv } from 'arkwasm';
+
+const env: WasiEnv = {
+  nowNanos: () => BigInt(performance.now() * 1e6),
+  clockResolution: () => 1_000_000n,
+  randomFill: (buf) => crypto.getRandomValues(buf),
+  stdin: new Uint8Array(0),
+  onStdout: (data) => { const s = String.fromCharCode(...data); console.log(s); },
+  onStderr: (data) => { const s = String.fromCharCode(...data); console.warn(s); },
+  preopens: [],
+  // 浏览器无文件系统，path_open 等返回 ENOSYS
+};
+
+const wasi = new WasiProvider(env, ['./app']);
+const rt = new WasmRuntime(wasi);
+```
+
+#### Node.js（完整文件系统）
+
+```typescript
+import { WasmRuntime, WasiProvider, WasiEnv } from 'arkwasm';
+import { readFileSync, writeFileSync, openSync, closeSync, readSync,
+         writeSync, mkdirSync, rmdirSync, unlinkSync, renameSync,
+         readlinkSync, symlinkSync, statSync, readdirSync } from 'node:fs';
+import { randomFillSync } from 'node:crypto';
+
+const fds = new Map<number, string>();
+const env: WasiEnv = {
+  nowNanos: () => BigInt(Date.now()) * 1_000_000n,
+  clockResolution: () => 1_000_000n,
+  randomFill: (buf) => randomFillSync(buf),
+  onStdout: (data) => process.stdout.write(data),
+  onStderr: (data) => process.stderr.write(data),
+  preopens: [{ path: '/', filetype: 3 }],
+  fsOpen: (path) => {
+    try { const fd = openSync(path, 'r+'); fds.set(fd, path); return fd; }
+    catch { return -8/*EBADF*/; }
+  },
+  fsRead: (fd, buf, offset) => {
+    try { return readSync(fd, buf, 0, buf.length, Number(offset)); }
+    catch { return -8; }
+  },
+  fsClose: (fd) => { closeSync(fd); fds.delete(fd); return 0; },
+  // ... 其余回调类推
+};
 ```
 
 ---
