@@ -1,9 +1,8 @@
 # ArkWASM
 
-> WebAssembly Micro Runtime 的纯 TypeScript/ArkTS 移植。  
-> Interpreter-only · 263 测试 · 零原生依赖 · 浏览器 / 鸿蒙元服务
+参考 [bytecodealliance/wasm-micro-runtime](https://github.com/bytecodealliance/wasm-micro-runtime) 经典解释器架构实现的鸿蒙元服务WASM运行时，同时可作为纯TS的WASM运行时。
 
-参考 [bytecodealliance/wasm-micro-runtime](https://github.com/bytecodealliance/wasm-micro-runtime) 经典解释器架构实现的鸿蒙元服务WASM运行时。
+A vibe coding project with OpenCode + DeepSeekV4 Pro.
 
 ---
 
@@ -56,15 +55,13 @@ ohpm install ../path/to/dist/arkwasm.har
 import { WasmRuntime, WasmValue } from 'arkwasm';
 ```
 
-**方式三：从 rawfile 加载 .wasm**
+**加载 .wasm（示例：从 rawfile）**
 
 ```typescript
 import { WasmRuntime, WasmValue } from '../wasm/Index';
 import { common } from '@kit.AbilityKit';
 
-// 在 UIAbility 或 Component 中：使用 this.context
-// 在 HAR 库中：由调用方传入 context
-function loadWasm(ctx: common.Context): void {
+async function loadWasm(ctx: common.Context): Promise<void> {
   const rm = ctx.resourceManager;
   const raw = await rm.getRawFileContent('module.wasm');
   const wasm = new Uint8Array(raw.buffer);
@@ -99,7 +96,7 @@ arkwasm/
 ├── .gitignore
 │
 ├── entry/src/main/ets/wasm/  # 源代码 (10 个 .ets)
-│   ├── WasmOpcode.ets         ★ 554 条指令集中定义
+│   ├── WasmOpcode.ets         554 条指令集中定义
 │   ├── WasmTypes.ets          值类型 + 数据结构
 │   ├── WasmInterpreter.ets    解释器引擎 (switch dispatch)
 │   ├── WasmLoader.ets         .wasm 二进制解析
@@ -262,42 +259,88 @@ throw new HostTrap('wasi: exit(0)');  // → Wasm 执行终止
 ### 使用
 
 ```typescript
-import { WasiProvider } from 'arkwasm';
+import { WasmRuntime, WasiProvider, HostTrap } from '../wasm/Index';
+// 浏览器：import { WasmRuntime, WasiProvider, HostTrap } from 'arkwasm';
 
 const wasi = new WasiProvider(undefined, ['./app', '--verbose'], { HOME: '/data' });
 const rt = new WasmRuntime(wasi);
 try { rt.invokeByName(rt.instantiate(wasiWasm), '_start', []); }
-catch (e) { if (e instanceof HostTrap) console.log('exit'); }
+catch (e) { if (e instanceof HostTrap) console.log('WASI exit'); }
 ```
 
-### 各环境 WasmEnv 实现示例
+### 各环境 WasiEnv 实现示例
 
 #### 鸿蒙元服务（完整文件系统 + 随机数 + 时钟）
 
-创建 `HarmonyWasiEnv.ets`，参考 [`entry/src/main/ets/wasm/wasi/HarmonyWasiEnv.ets`](entry/src/main/ets/wasm/wasi/HarmonyWasiEnv.ets)：
+**1. 复制参考文件到项目**
+
+将 `entry/src/main/ets/wasm/wasi/HarmonyWasiEnv.ets` 复制到你的 `wasm/` 目录下。
+
+**2. 在 Component 中调用**
 
 ```typescript
-import { WasiProvider } from 'arkwasm';
-import { createHarmonyWasiEnv } from './HarmonyWasiEnv';
+import { WasmRuntime, WasiProvider } from '../wasm/Index';
+import { createHarmonyWasiEnv } from '../wasm/HarmonyWasiEnv';
 import { common } from '@kit.AbilityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
-// 在 UIAbility / Component 中：
-const ctx = getContext(this) as common.UIAbilityContext;
-const wasi = new WasiProvider(createHarmonyWasiEnv(ctx), ['./app'], {});
+const DOMAIN = 0x0000;
 
-const rt = new WasmRuntime(wasi);
-const rm = ctx.resourceManager;
-const raw = await rm.getRawFileContent('module.wasm');
-const inst = rt.instantiate(new Uint8Array(raw.buffer));
+@Entry
+@Component
+struct MyPage {
+  private runtime: WasmRuntime | null = null;
+  @State result: string = '';
 
-try { rt.invokeByName(inst, '_start', []); }
-catch (e) { if (e instanceof HostTrap) hilog.info(0, 'wasi', 'exit'); }
+  async aboutToAppear(): Promise<void> {
+    // 获取 resourceManager（两种方式，根据你的 Context 类型选择）
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const rm = ctx.resourceManager;
+
+    // 创建 WASI 环境（默认挂载 rawfile 目录为 /）
+    const wasi = new WasiProvider(
+      createHarmonyWasiEnv(ctx),
+      ['./myapp.wasm', '--verbose'],
+      { HOME: '/data' }
+    );
+    this.runtime = new WasmRuntime(wasi);
+
+    // 从 rawfile 加载 .wasm
+    const raw = await rm.getRawFileContent('module.wasm');
+    const inst = this.runtime.instantiate(new Uint8Array(raw.buffer));
+
+    // 执行 WASM（_start 是 WASI 程序的入口）
+    try {
+      const res = this.runtime.invokeByName(inst, '_start', []);
+      if (res.trap) {
+        hilog.error(DOMAIN, 'wasm', 'trap: %{public}s', res.trap);
+      } else if (res.values.length > 0) {
+        this.result = res.values[0].getAsI32().toString();
+      }
+    } catch (e) {
+      // WASI proc_exit 会抛 HostTrap，这是正常的退出信号
+      if (e instanceof HostTrap) {
+        hilog.info(DOMAIN, 'wasm', 'WASI exit: %{public}s', e.message);
+      } else {
+        hilog.error(DOMAIN, 'wasm', 'runtime error: %{public}s', (e as Error).message);
+      }
+    }
+  }
+
+  build() {
+    Column() {
+      Text(this.result || 'Loading...')
+        .fontSize(16)
+    }
+  }
+}
 ```
 
 #### 浏览器（最小实现）
 
 ```typescript
 import { WasmRuntime, WasiProvider, WasiEnv } from 'arkwasm';
+// 或：import { WasmRuntime, WasiProvider, WasiEnv } from './wasm/Index';
 
 const env: WasiEnv = {
   nowNanos: () => BigInt(performance.now() * 1e6),
